@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# This script takes commit and breaks the commit into individual 
+# commits.  This is primarily testing work for TD Bank, but may
+# be applicable to other customers. 
+
+set -eEuo pipefail
+echo "Running pre-commit"
+git diff-index --name-only --diff-filter A -z HEAD | 
+	while read -r -d '' fn
+	do 
+		echo "Adding: $fn"
+		git add "$fn"
+		git commit -a -m "adding" --no-verify
+	done
+git reset HEAD
+echo "after rebase"
+git diff-index --name-only --diff-filter M -z HEAD |
+    while read -r -d '' fn
+    do
+		echo "fn: $fn"
+		# git stash
+		git add "$fn"
+		git commit -m "mynewcommnet" --no-verify
+		#git rebase --continue
+		
+    done
+echo "Modified files are done"
+git reset HEAD

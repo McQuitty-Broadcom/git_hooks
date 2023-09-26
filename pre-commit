@@ -1,0 +1,149 @@
+#!/c/Python311/python
+# This script performs some basic operations:
+# It gets a list of files changed in the current commit,
+# then it checks out the item from Endevor, uploads the content
+# to a dataset, then finally breaks the commit apart and creates
+# commits for each individual file.  This supports TD Bank's need
+# to use comments for their build process.
+import subprocess
+import sys
+import json
+from dotmap import DotMap
+
+HLQ="mcqth01"
+def read_mapping():
+    with open(".ebg/mapping.json") as f:
+        mapping = json.load(f)
+    return mapping
+
+def get_last_commit_message(file, environment, system, subsystem, type, stageNumber):
+    get_last_msg = f"zowe.cmd endevor list elements {file} --env {environment} --sys {system} --sub {subsystem} --sn {stageNumber} --type {type} --rff lastActComment --rfh false --sm"
+    last_message = execute(get_last_msg)
+    last_message = last_message.split("\n")[0]
+    return last_message
+
+def execute(cmd):
+    cmd_output = ""
+    try:
+        zowe_cmd = False
+        json_output = []
+        print(f"executing: {cmd}")
+        cmd_output = subprocess.run(cmd, capture_output=True, text=True)
+        if cmd.find("zowe") >= 0 and cmd.find("--rfj") >= 0:
+            zowe_cmd = True
+            json_output = json.loads(cmd_output.stdout)
+        if cmd_output.returncode > 0:
+            print(f"Command Failed: {cmd}\nCommand Output: {cmd_output.stderr}\n{cmd_output.stderr}")
+            sys.exit(cmd_output.returncode)
+        elif zowe_cmd and json_output["data"]["returnCode"] > 0:
+            print(f"Command Error: {cmd}\nCommand Output:\n{cmd_output.stdout}\n{cmd_output.stderr}")
+            sys.exit(json_output["data"]["returnCode"])
+        else:
+            return cmd_output.stdout
+    except:
+        print("cmd:", cmd_output)
+        print(sys.exc_info())
+        sys.exit(99)
+
+def parse_dataset(path):
+    # gets the filename and strips the extension
+    print(path)
+    filename = path.rsplit("/", 1)[1].split(".")[0]
+    # gets the folder structure and replaces / with .
+    dsn = file.rsplit("/", 1)[0].replace("/", ".")
+    return dsn, filename
+
+def parse_filename(filepath):
+    file_system = filepath.split("/")[0]
+    file_subsystem = filepath.split("/")[1]
+    file_type = filepath.split("/")[2]
+    file_name = filepath.split("/")[3]
+    return file_system, file_subsystem, file_type, file_name
+    
+def get_branch():
+    return execute("git branch --show-current").replace("* ", "").replace("\n","").strip()
+
+def diff_changed_files():
+    diff_list = execute("git diff --name-only --cached")
+    files = diff_list.split("\n")
+    files.remove("")
+    return files
+
+def get_endevor_location():
+    mapping = DotMap(read_mapping())
+    mapped_branches = mapping.branches
+    env = list(filter(lambda branches: branches.name == branch, mapped_branches))
+    if not env:
+        print("Branch not Mapped")
+        sys.exit(1)
+    environment = env[0].environment
+    stageNumber = env[0].stageNumber
+    system = env[0].systems[0].name
+    subsystem = env[0].systems[0].subsystems[0].name
+    
+    return environment, stageNumber, system, subsystem
+
+def checkout_file(file, type):
+    ccid = comment = "TEMP" ## Does this need updating?
+    environment, stageNumber, system, subsystem = get_endevor_location()
+    # ccid, comment = get_last_commit_message(file, environment, system, subsystem, stageNumber, type)
+    signout_cmd = f'zowe.cmd endevor ret element {file} --env {environment} --sys {system} --sub {subsystem} --sn {stageNumber} --type {type} --signout --ccid {ccid} --comment "{comment}" --rfj'
+    execute(signout_cmd)
+    print(f"{file} checked out")
+
+branch = get_branch()
+print("Git branch:", branch)
+
+
+#
+# Run add command for each item changed
+environment, stageNumber, system, subsystem = get_endevor_location()
+committed_files = diff_changed_files()
+print(f"Committed Files: {committed_files}")
+for file in committed_files:
+    print(file)
+    if not (file.find(".json") or file.find(".git")):
+        file_system, file_subsystem = parse_filename(file)
+        if file_system == system and file_subsystem == subsystem:
+            print(f"processing {file}")
+            dsn, fn = parse_dataset(file)
+            dsname = f'"{HLQ}.{branch}.{dsn}({fn})"'
+
+            checkout_file(fn, dsn.rsplit(".", 1)[1])
+            execute(f'zowe.cmd files upload file-to-data-set {file} "{dsname}"')
+            print(f"Updated Dataset: {dsname.upper()}")
+
+# Get files to add
+# We have to run through the files in a specific order.  If Adds aren't
+# done first, they will revert back.  Here we validate the operations we
+# are looking for and process them.
+def break_commit_apart(operation):
+    valid_operations = ["M", "A"]
+    if operation not in valid_operations:
+        print(f"Error, you used {operation}")
+        sys.exit(11)
+    files = execute(f"git diff-index --name-only --diff-filter {operation} HEAD")
+    if len(files) > 0:
+        print(f"Modified FILES: {files}", len(files))
+        files = files.split("\n")
+        files.remove("")
+        for file in files:
+            print(f"Processing {file}")
+            print("not git or .ignore")
+            file_system, file_subsystem, type, filename = parse_filename(file)
+            print(f"status: {file_system} {file_subsystem}")
+            if file_system == system and file_subsystem == subsystem:
+                print("got here")
+                print(f"FILENAME = {file}")
+                commit_msg = get_last_commit_message(filename.split(".")[0], environment, system, subsystem, type, stageNumber)
+                print(f"ADD FILE: {file}")
+                execute(f"git add {file}")                
+                print(f'git commit -m "{commit_msg}" --no-verify')
+                execute(f'git commit -m "{commit_msg}" --no-verify')
+
+        execute("git reset head")
+
+break_commit_apart("A")
+break_commit_apart("M")
+
+sys.exit(0)
