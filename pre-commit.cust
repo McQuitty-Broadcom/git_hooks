@@ -3,14 +3,14 @@
 # It gets a list of files changed in the current commit,
 # then it checks out the item from Endevor, uploads the content
 # to a dataset, then finally breaks the commit apart and creates
-# commits for each individual file.  This supports a customer need
+# commits for each individual file.  This supports a need
 # to use comments for their build process.
 import subprocess
 import sys
 import json
 from dotmap import DotMap
 
-HLQ="mcqth01"
+HLQ="DBAT"
 
 def read_mapping():
     with open(".ebg/mapping.json") as f:
@@ -28,11 +28,11 @@ def execute(cmd):
     try:
         zowe_cmd = False
         json_output = []
-        print(f"executing: {cmd}")
         cmd_output = subprocess.run(cmd, capture_output=True, text=True)
         if cmd.find("zowe") >= 0 and cmd.find("--rfj") >= 0:
             zowe_cmd = True
             json_output = json.loads(cmd_output.stdout)
+            
         if cmd_output.returncode > 0:
             print(f"Command Failed: {cmd}\nCommand Output: {cmd_output.stderr}\n{cmd_output.stderr}")
             sys.exit(cmd_output.returncode)
@@ -110,15 +110,15 @@ environment, stageNumber, system, subsystem = get_endevor_location()
 committed_files = diff_changed_files()
 print(f"Committed Files: {committed_files}")
 for file in committed_files:
-    print(file)
+    print(f"file {file}")
     if not (file.find(".json") or file.find(".git")):
         file_system, file_subsystem = parse_filename(file)
         if file_system == system and file_subsystem == subsystem:
             print(f"processing {file}")
-            dsn, fn = parse_dataset(file)
-            dsname = f'"{HLQ}.{branch}.{dsn}({fn})"'
+            dsn, fn, element_type = parse_dataset(file)
+            dsname = f'"{HLQ}.{branch}.{element_type}({fn})"'
 
-            checkout_file(fn, dsn.rsplit(".", 1)[1])
+            #checkout_file(fn, dsn.rsplit(".", 1)[1])
             execute(f'zowe.cmd files upload file-to-data-set {file} "{dsname}"')
             print(f"Updated Dataset: {dsname.upper()}")
 
