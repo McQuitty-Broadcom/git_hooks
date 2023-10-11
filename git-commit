@@ -1,0 +1,295 @@
+#!/c/Python311/python  
+#
+# 
+# This may need to be changed for the environment
+#
+#
+# This script performs some basic operations:
+# It gets a list of files changed in the current commit,
+# then it checks out the item from Endevor, uploads the content
+# to a dataset, then finally breaks the commit apart and creates
+# commits for each individual file.  This supports TD Bank's need
+# to use comments for their build process.
+import argparse
+import subprocess
+import sys
+import json
+import traceback
+import functools
+from shutil import which
+from dotmap import DotMap
+
+HLQ="mcqth01"
+
+### This is a list of strings excluded from processing
+### Any that match will be excluded
+exclusions = [".json", ".git", ".bridge"]
+
+### Parsing for options
+parser = argparse.ArgumentParser()
+parser.add_argument("-p", "--prompt", help="Prompt for each file", action="store_true")
+parser.add_argument("-l", "--logging", help="Logging for Debugging", action="store_true")
+args = parser.parse_args()
+
+### Decorator to log functions to make it cleaner
+def log_exec(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        function_name = func.__name__
+        args_str = ', '.join([repr(arg) for arg in args])
+        kwargs_str = ', '.join([f'{key}={value!r}' for key, value in kwargs.items()])
+        logger(f'Entering {function_name}({args_str}, {kwargs_str})')
+        result = func(*args, **kwargs)
+        logger(f'Exiting {function_name} -> {result!r}')
+        return result
+    return wrapper
+
+#FIGURE OUT THIS LOGGING CRAP!! 
+if args.logging:
+    print("logging turned on.")
+
+def preflight_check():
+    return which("zowe") is not None
+
+### Routine to log and display output
+def logger(msg, display=False):
+    if display or args.logging:
+        print(f"{msg}")
+
+### Reads the mapping file to ensure we are on the correct branch
+### And won't process items if we are on a non-synchronized branch
+def read_mapping():
+    with open(".ebg/mapping.json") as f:
+        mapping = json.load(f)
+    return mapping
+
+## Work in progress... get a list of the comments and determine the 
+## correct one to use.
+
+@log_exec
+def last_comment(data, environment, sn):
+    element_list = list(filter(lambda env: env["envName"]==environment, data))
+    logger(f"Element List: {element_list}")
+    
+    # if we only find one, we return the value, regardless.
+    if len(element_list) == 0:
+        logger("No previous comment, please see admin for next steps", True)
+        sys.exit(2)
+    if len(element_list) == 1:
+        msg = element_list[0]["lastActComment"]
+        return msg
+    elif len(element_list) > 1:
+        # What do we want to do here?
+        return element_list[0]["lastActComment"]
+    
+@log_exec    
+def get_last_commit_message(file, environment, system, subsystem, type, stageNumber):
+    cmd = f"zowe.cmd endevor list elements {file} --env * --sys {system} --sub {subsystem} --sn * --type {type} --sm --rfj --write-report false"
+    output = execute(cmd)
+    json_out = json.loads(output)
+    if "data" not in json_out.keys():
+        logger("No previous comment, please see admin for next steps", True)
+        sys.exit(2)
+    return last_comment(json_out["data"], environment, stageNumber)
+
+### We pass in various commands, so let's see if the output is JSON or not.
+def is_json(txt):
+    try:
+        json.loads(txt)
+    except ValueError as e:
+        return False
+    return True
+
+# The API responses aren't normalized, so let's find the right error condition
+@log_exec
+def process_errors(msg):
+    if "messages" in msg["data"]:
+        logger(msg["data"]["messages"], True)
+    elif "commandResponse" in msg["data"]:
+        logger(msg["data"]["commandResponse"], True)
+    else:
+        logger("Untrapped Error")
+        
+
+@log_exec
+def execute(cmd):
+    cmd_output = ""
+    try:
+        cmd_output = subprocess.run(cmd, capture_output=True, text=True)
+        if is_json(cmd_output.stdout):
+            logger("JSON output")
+            out = json.loads(cmd_output.stdout)
+            logger(out)
+            # Check for return code and report message
+            if out["success"] != True:
+                logger(f"Error executing: {cmd_output.args}", True)
+                process_errors(out)
+                sys.exit(2)
+            return cmd_output.stdout
+        else:
+            return cmd_output.stdout
+    except SystemExit:
+        print("Error processing files, see above.")
+        sys.exit(2)
+    except:
+        logger(f"Error executing cmd:{cmd_output.args}", True)
+        logger(sys.exc_info()[0])
+        logger(traceback.extract_stack())
+        sys.exit(2)
+
+### Parses the dataset to create the DSN (dot notation) from path, 
+### and get the filename (without extension)
+@log_exec
+def parse_dataset(path):
+    filename = path.rsplit("/", 1)[1].split(".")[0]
+    dsn      = path.rsplit("/", 1)[0].replace("/", ".")
+    return dsn, filename
+
+### Parses the filepath to get system, subsystem, type and name
+### from file structure
+@log_exec
+def parse_filename(filepath):
+    ### If it doesn't fit within this structure, we want to fail it.
+    try:
+        file_system    = filepath.split("/")[0]
+        file_subsystem = filepath.split("/")[1]
+        file_type      = filepath.split("/")[2]
+        file_name      = filepath.split("/")[3]
+        logger(f"Parsed filename: {file_system} {file_subsystem} {file_type} {file_name}")
+        return file_system, file_subsystem, file_type, file_name
+    except:
+        logger("Couldn't parse filename", True)
+        return False
+
+### Gets the current branch, so we can test to ensure we are on a sync'd branch
+@log_exec
+def get_branch():
+    return execute("git branch --show-current").replace("* ", "").replace("\n","").strip()
+
+### Gets the Endevor Location and ensures we are on a mapped branch
+@log_exec
+def get_endevor_location():
+    mapping         = DotMap(read_mapping())
+    mapped_branches = mapping.branches
+    env             = list(filter(lambda branches: branches.name == branch, mapped_branches))
+    if not env:
+        logger('Branch not Mapped\nIf you need to commit this branch, run:\ngit commit -m "msg" --no-verify', True)
+        sys.exit(2)
+    try:
+        environment     = env[0].environment
+        stageNumber     = env[0].stageNumber
+        system          = env[0].systems[0].name
+        subsystem       = env[0].systems[0].subsystems[0].name
+        logger(f"Endevor Location info: {environment}\{stageNumber}\{system}\{subsystem}")
+    except:
+        logger("Error capturing mapping location", True)
+        sys.exit(2)
+    return environment, stageNumber, system, subsystem
+
+### To fit with current process, we want to check out the file from Endevor, so it is locked.
+@log_exec
+def checkout_file(file, type):
+    ccid = comment = "TEMP" ## Does this need updating?
+    signout_cmd = f'zowe.cmd endevor ret element {file} --env {environment} --sys {system} --sub {subsystem} --sn {stageNumber} --type {type} --signout --ccid {ccid} --comment "{comment}" --rfj --sm --write-report false'
+    execute(signout_cmd)
+    logger(f"{file} checked out")
+
+@log_exec
+def update_dataset(file, system, subsystem):
+    if not any(value in file for value in exclusions):
+        file_system, file_subsystem = parse_filename(file)[0:2]
+        if file_system == system and file_subsystem == subsystem:
+            dsn, fn = parse_dataset(file)
+            dsname = f'"{HLQ}.{branch}.{dsn}({fn})"'
+            execute(f'zowe.cmd files upload file-to-data-set {file} {dsname} --rfj')
+            logger(f"{file} checkout and {dsname.upper()} updated.", True)
+
+### Sets the operation, then commits it.
+@log_exec
+def commit_files(file, comment, operation):
+    if operation == "A" or operation == "M":
+        execute(f"git add {file}")
+    elif operation == "D":
+        execute(f'git rm {file}')
+    execute(f'git commit -m "{comment}" --no-verify')
+
+@log_exec        
+def clean_list(x):
+    x = x.split("\n")
+    x.remove("")
+    return x
+
+@log_exec
+def file_prompting(file):
+    if args.prompt: 
+        add = input(f"Would you like to store {file}? (y/n)")
+        if add == "n":
+            # If we don't want to process it, we skip it using continue
+            logger(f"Skipping {file}.", True)
+            return True
+        else:
+            return False
+@log_exec
+def modify_operation(file, name, tp):
+    logger(f"Checking out {file}", True)
+    checkout_file(name, tp)
+    commit_msg = get_last_commit_message(name.split(".")[0], environment, system, subsystem, tp, stageNumber)
+    logger(f"{file} reusing comment {commit_msg}", True)
+    commit_files(file, commit_msg, "M")
+    
+# Get files to add
+# We have to run through the files in a specific order.  If Adds aren't
+# done first, they will revert back.  Here we validate the operations we
+# are looking for and process them.
+@log_exec
+def break_commit_apart(operation):
+    valid_operations = ["M", "A", "D"]
+    if operation not in valid_operations:
+        logger(f"Error, you used {operation}", True)
+        sys.exit(2)
+    files = clean_list(execute(f"git diff-index --name-only --diff-filter {operation} HEAD"))
+    if len(files) > 0:
+        logger(f"Modified FILES: {files}")
+        for file in files:
+            if file_prompting(file):
+                continue
+            logger(f"Processing {file}", True)
+            if file.find(f"{system}/{subsystem}") >= 0:
+                sys, sub, tp, name = parse_filename(file)
+                logger(f"Operation: {operation}")
+                # Do we want code for adding the file?  If so, how do we handle the comment?
+                if operation == "M":
+                    modify_operation(file, name, tp)
+                elif operation == "A":
+                    # We can't add the file, at least not yet, but we can update the dataset
+                    update_dataset(name, system, subsystem)
+                elif operation == "D":
+                    commit_files(file, "Deleting", operation)
+                else:
+                    logger("Operation not defined",True)
+                    sys.exit(2)
+            else:                  
+                logger(f"Non-mapped file processed: {file}", True)
+                commit_files(file, "Support File", operation)
+
+if __name__ == "__main__":
+    # Sanity check to ensure Zowe is installed
+    if not preflight_check():
+        logger("Zowe is not installed, please contact your admin for assistance.", True)
+        sys.exit(2)
+        
+    # Get the working branch name
+    branch = get_branch()
+    logger(f"Git branch: {branch}", True)
+
+    #
+    # Run add command for each item changed
+    environment, stageNumber, system, subsystem = get_endevor_location()
+
+    # Perform actions  Do we need other actions?
+    break_commit_apart("D")
+    break_commit_apart("A") # How do we want to handle that for new files?
+    break_commit_apart("M")
+    logger("\n",True)
+    logger(execute("git status"),True)
+    sys.exit(0)
