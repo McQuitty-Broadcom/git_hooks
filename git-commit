@@ -19,11 +19,12 @@ import functools
 from shutil import which
 from dotmap import DotMap
 
+# HLQ for datasets
 HLQ="mcqth01"
 
 ### This is a list of strings excluded from processing
 ### Any that match will be excluded
-exclusions = [".json", ".git", ".bridge"]
+exclusions = [".json", ".git", ".bridge", "mapping.json"]
 
 ### Parsing for options
 parser = argparse.ArgumentParser()
@@ -38,15 +39,15 @@ def log_exec(func):
         function_name = func.__name__
         args_str = ', '.join([repr(arg) for arg in args])
         kwargs_str = ', '.join([f'{key}={value!r}' for key, value in kwargs.items()])
-        logger(f'Entering {function_name}({args_str}, {kwargs_str})')
+        logger(f'Entering: {function_name}({args_str}, {kwargs_str})')
         result = func(*args, **kwargs)
-        logger(f'Exiting {function_name} -> {result!r}')
+        logger(f'Exiting:  {function_name} -> {result!r}')
         return result
     return wrapper
 
-#FIGURE OUT THIS LOGGING CRAP!! 
 if args.logging:
     print("logging turned on.")
+    print("If you want to capture the output, use git-commit > log.txt")
 
 def preflight_check():
     return which("zowe") is not None
@@ -180,17 +181,22 @@ def get_endevor_location():
         stageNumber     = env[0].stageNumber
         system          = env[0].systems[0].name
         subsystem       = env[0].systems[0].subsystems[0].name
+        try:
+            alias           = env[0].systems[0].subsystems[0].alias
+        except:
+            alias = None
         logger(f"Endevor Location info: {environment}\{stageNumber}\{system}\{subsystem}")
     except:
         logger("Error capturing mapping location", True)
         sys.exit(2)
-    return environment, stageNumber, system, subsystem
+    return environment, stageNumber, system, subsystem, alias
 
 ### To fit with current process, we want to check out the file from Endevor, so it is locked.
 @log_exec
-def checkout_file(file, type):
+def checkout_file(file, type, dsn):
     ccid = comment = "TEMP" ## Does this need updating?
-    signout_cmd = f'zowe.cmd endevor ret element {file} --env {environment} --sys {system} --sub {subsystem} --sn {stageNumber} --type {type} --signout --ccid {ccid} --comment "{comment}" --rfj --sm --write-report false'
+    file = file.split(".")[0]
+    signout_cmd = f'zowe.cmd endevor ret element {file} --env {environment} --sys {system} --sub {subsystem} --sn {stageNumber} --type {type} --signout --ccid {ccid} --comment "{comment}" --rfj --sm --write-report false --td {dsn} --rm true'
     execute(signout_cmd)
     logger(f"{file} checked out")
 
@@ -198,7 +204,7 @@ def checkout_file(file, type):
 def update_dataset(file, system, subsystem):
     if not any(value in file for value in exclusions):
         file_system, file_subsystem = parse_filename(file)[0:2]
-        if file_system == system and file_subsystem == subsystem:
+        if file_system == system and (file_subsystem == subsystem or file_system == alias):
             dsn, fn = parse_dataset(file)
             dsname = f'"{HLQ}.{branch}.{dsn}({fn})"'
             execute(f'zowe.cmd files upload file-to-data-set {file} {dsname} --rfj')
@@ -229,13 +235,17 @@ def file_prompting(file):
             return True
         else:
             return False
+
 @log_exec
 def modify_operation(file, name, tp):
     logger(f"Checking out {file}", True)
-    checkout_file(name, tp)
+    dsn, fn = parse_dataset(file)
+    dsname = f'"{HLQ}.{branch}.{dsn}"'
+    checkout_file(name, tp, dsname)
     commit_msg = get_last_commit_message(name.split(".")[0], environment, system, subsystem, tp, stageNumber)
     logger(f"{file} reusing comment {commit_msg}", True)
     commit_files(file, commit_msg, "M")
+
     
 # Get files to add
 # We have to run through the files in a specific order.  If Adds aren't
@@ -254,15 +264,18 @@ def break_commit_apart(operation):
             if file_prompting(file):
                 continue
             logger(f"Processing {file}", True)
-            if file.find(f"{system}/{subsystem}") >= 0:
+            if file.find(f"{system}/{subsystem}")  >= 0 or file.find(f"{system}/{alias}") >= 0:
                 sys, sub, tp, name = parse_filename(file)
                 logger(f"Operation: {operation}")
                 # Do we want code for adding the file?  If so, how do we handle the comment?
                 if operation == "M":
                     modify_operation(file, name, tp)
+                    # sub_or_alias = subsystem if alias == None else alias
+                    # update_dataset(name, system, sub_or_alias)
                 elif operation == "A":
                     # We can't add the file, at least not yet, but we can update the dataset
-                    update_dataset(name, system, subsystem)
+                    sub_or_alias = subsystem if alias == None else alias
+                    update_dataset(name, system, sub_or_alias)
                 elif operation == "D":
                     commit_files(file, "Deleting", operation)
                 else:
@@ -284,7 +297,7 @@ if __name__ == "__main__":
 
     #
     # Run add command for each item changed
-    environment, stageNumber, system, subsystem = get_endevor_location()
+    environment, stageNumber, system, subsystem, alias = get_endevor_location()
 
     # Perform actions  Do we need other actions?
     break_commit_apart("D")
