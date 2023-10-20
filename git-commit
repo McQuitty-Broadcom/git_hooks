@@ -103,25 +103,26 @@ def proceed_to_copy(element, type, dsn, file):
         write_file("previous.txt", previous_contents)
     if compare_strings(element_contents, dataset_contents):
         return status.NO_CONFLICT
-    elif not compare_strings(dataset_contents, previous_contents):
-        return status.CONFLICT_DATASET
     else:
-        return status.CONFLICT_ENDEVOR
+        if compare_strings(dataset_contents, previous_contents):
+            return status.NO_CONFLICT
+        else:
+            return status.CONFLICT_DATASET
 
-@log_exec
+# @log_exec
 def get_endevor_element(element, type): 
     element_contents = execute(f"zowe.cmd endevor ret element {element} --type {type} --system {system} --sub {subsystem} --sm true")
-    return element_contents
+    return remove_empty_lines(element_contents)
 
-@log_exec
+# @log_exec
 def get_dataset_member(dsn, member):
     ds_contents = execute(f"zowe files view ds {dsn}({member})")
-    return ds_contents
+    return remove_empty_lines(ds_contents)
 
-@log_exec
+# @log_exec
 def get_previous_commit(file) -> str:
-    previous_file_contents = execute(f"git show HEAD^:{file}")
-    return previous_file_contents
+    previous_file_contents = execute(f"git show HEAD:{file}")
+    return remove_empty_lines(previous_file_contents)
 
 @log_exec
 def compare_strings(str1, str2):
@@ -175,6 +176,7 @@ def process_errors(msg):
         logger("Untrapped Error")
         
 
+## Do some work to make this better?
 @log_exec
 def execute(cmd):
     cmd_output = ""
@@ -247,7 +249,7 @@ def get_endevor_location():
             alias           = env[0].systems[0].subsystems[0].alias
         except:
             alias = None
-        logger(f"Endevor Location info: {environment}\{stageNumber}\{system}\{subsystem}")
+        logger(f"Endevor Location info: {environment}\{stageNumber}\{system}\{subsystem}\{alias}")
     except:
         logger("Error capturing mapping location", True)
         sys.exit(2)
@@ -269,8 +271,13 @@ def update_dataset(file, system, subsystem):
         if file_system == system and (file_subsystem == subsystem or file_system == alias):
             dsn, fn = parse_dataset(file)
             dsname = f'"{HLQ}.{branch}.{dsn}({fn})"'
+            with open(file, "r") as f:
+                contents = f.read()
+            logger(f"Copying {file}, contents\n\n\n\n{contents}")
             execute(f'zowe.cmd files upload file-to-data-set {file} {dsname} --rfj')
             logger(f"{file} checkout and {dsname.upper()} updated.", True)
+            #remove next line
+            # sys.exit(9)
 
 ### Sets the operation, then commits it.
 @log_exec
@@ -280,6 +287,10 @@ def commit_files(file, comment, operation):
     elif operation == "D":
         execute(f'git rm {file}')
     execute(f'git commit -m "{comment}" --no-verify')
+
+@log_exec
+def remove_empty_lines(text):
+    return "".join([line for line in text if line != ""])
 
 @log_exec        
 def clean_list(x):
@@ -306,6 +317,27 @@ def modify_operation(file, name, tp, dsname):
     logger(f"{file} reusing comment {commit_msg}", True)
     commit_files(file, commit_msg, "M")
 
+@log_exec
+def process_modify(fn, tp, dsname, file, sub_or_alias, name):
+    over = None
+    can_copy = proceed_to_copy(fn, tp, dsname, file)
+    if can_copy == status.NO_CONFLICT or args.overwrite_dataset == True:
+        if args.overwrite_dataset:
+            over = input("WARNING: Would you like to overwrite the dataset with current changes in it? (y/n)")
+        if over == "y" or over is None:
+            logger(f"Overwriting dataset: {dsname}", True)
+            modify_operation(file, name, tp, dsname)
+            update_dataset(file, system, sub_or_alias)
+
+        else:
+            logger("Skipping dataset update", True)
+    else:
+        if can_copy == status.CONFLICT_ENDEVOR:
+            logger("There's a conflict between the Endevor Element and Dataset", True)
+        elif can_copy == status.CONFLICT_DATASET:
+            logger(f"There's a conflict between the dataset {dsname} and the commit.  This could be due to someone making changes in the dataset.", True)
+        logger("Resolve this issue and try the command again.", True)
+        sys.exit(2)
     
 # Get files to add
 # We have to run through the files in a specific order.  If Adds aren't
@@ -331,27 +363,10 @@ def break_commit_apart(operation):
                     dsname = f'"{HLQ}.{branch}.{dsn}"'
                     sub_or_alias = subsystem if alias == None else alias
                     logger(f"Operation: {operation}")
-                    logger(f"PARAMS: {syst}:{sub}:{tp}:{name}:{dsn}:{fn}\n\n\n")
+                    logger(f"PARAMS: {syst}:{sub}:{tp}:{name}:{dsn}:{fn}")
                     # Do we want code for adding the file?  If so, how do we handle the comment?
                     if operation == "M":
-                        over = None
-                        can_copy = proceed_to_copy(fn, tp, dsname, file)
-                        if can_copy == status.NO_CONFLICT or args.overwrite_dataset == True:
-                            if args.overwrite_dataset:
-                                over = input("WARNING: Would you like to overwrite the dataset with current changes in it? (y/n)")
-                            if over == "y" or over is None:
-                                logger("Overwriting dataset")
-                                update_dataset(file, system, sub_or_alias)
-                                modify_operation(file, name, tp, dsname)
-                            else:
-                                logger("Skipping update")
-                        else:
-                            if can_copy == status.CONFLICT_ENDEVOR:
-                                print("There's a conflict between the Endevor Element and Dataset")
-                            elif can_copy == status.CONFLICT_DATASET:
-                                print("There's a conflict between the dataset and the commit.  This could be due to someone making changes in the dataset.")
-                            print("Resolve this issue and try the command again.")
-                            sys.exit(2)
+                        process_modify(fn, tp, dsname, file, sub_or_alias, name)
                     elif operation == "A":
                         # We can't add the file, at least not yet, but we can update the dataset
                         update_dataset(file, system, sub_or_alias)
