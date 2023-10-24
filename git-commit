@@ -24,8 +24,21 @@ from dotmap import DotMap
 # HLQ for datasets
 HLQ = "mcqth01"
 
-# COLOR CODE FOR ERROR
 
+# COLOR CODE FOR ERROR
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[93m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+# Why bridge.json fails
 # Enumerated set to test for conflicts
 class status(Enum):
     CONFLICT_ENDEVOR = 1
@@ -305,7 +318,10 @@ def get_endevor_location():
             "\{system}\{subsystem}\{alias}"
         )
     except:
-        logger("Error capturing mapping location", True)
+        logger(bcolors.FAIL +
+               "Error capturing mapping location" +
+               bcolors.ENDC,
+               True)
         sys.exit(2)
     return environment, stageNumber, system, subsystem, alias
 
@@ -413,9 +429,10 @@ def process_modify(fn, tp, dsname, file, sub_or_alias, name):
         elif can_copy == status.CONFLICT_DATASET:
             dsname = dsname.replace('"', "")
             logger(
+                bcolors.FAIL +
                 f"There's a conflict between the dataset {dsname} "
                 + "and the commit.  This could be due to someone "
-                + "making changes in the dataset.",
+                + "making changes in the dataset." + bcolors.ENDC,
                 True)
             logger(
                 "To download the dataset to a local file, run " +
@@ -426,7 +443,8 @@ def process_modify(fn, tp, dsname, file, sub_or_alias, name):
             logger(
                 f"Make your changes and save them to {file}, " +
                 "then run 'git-commit -o'", True)
-        logger("Resolve this issue and try the command again.", True)
+        logger(bcolors.FAIL + "Resolve this issue and try the command again." +
+               bcolors.ENDC, True)
         sys.exit(2)
 
 
@@ -469,6 +487,7 @@ def break_commit_apart(operation):
                         # We can't add the file, at least not yet,
                         # but we can update the dataset
                         update_dataset(file, system, sub_or_alias)
+                        # MESSAGING : What to do next
                     elif operation == "D":
                         commit_files(file, "Deleting", operation)
                     else:
@@ -486,14 +505,15 @@ if __name__ == "__main__":
     # Sanity check to ensure Zowe is installed
     if not preflight_check():
         logger(
+            bcolors.FAIL +
             "Zowe is not installed, please contact" +
-            "your admin for assistance.", True
-        )
+            "your admin for assistance." + bcolors.ENDC,
+            True)
         sys.exit(2)
 
     # Get the working branch name
     branch = get_branch()
-    logger(f"Git branch: {branch}", True)
+    logger(bcolors.FAIL + f"Git branch: {branch}" + bcolors.ENDC, True)
 
     #
     # Run add command for each item changed
