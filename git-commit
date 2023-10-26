@@ -20,13 +20,16 @@ import re
 from enum import Enum
 from shutil import which
 from dotmap import DotMap
+from pathlib import Path
 
 # TODO: Script to set everything up
 # HLQ for datasets
 HLQ = "mcqth01"
 
 ZOWE_CMD = which("zowe")
+ZOWE_CMD_NAME = Path(which("zowe")).name
 VSCODE_CMD = which("code")
+VSCODE_CMD_NAME = Path(which("code")).name
 
 
 # COLOR CODE FOR ERROR
@@ -95,12 +98,10 @@ def write_file(name, contents):
 
 
 def preflight_check():
-    # ZOWE_CMD = which("zowe")
     return which("zowe") is not None
 
 
 def code_installed():
-    # VSCODE_CMD = which("code")
     return which("code") is not None
 
 
@@ -125,7 +126,7 @@ def read_mapping():
 
 @log_exec
 def ds_member_exists(dsn, member):
-    members = execute(f"{ZOWE_CMD} files list all-members {dsn}")
+    members = execute(f"{ZOWE_CMD_NAME} files list all-members {dsn}")
     members = clean_list(members)
     if member not in members:
         logger("Dataset Doesn't Exist")
@@ -157,7 +158,7 @@ def proceed_to_copy(element, type, dsn, file):
 # @log_exec
 def get_endevor_element(element, type):
     element_contents = execute(
-        f"{ZOWE_CMD} endevor ret element {element} --type {type} "
+        f"{ZOWE_CMD_NAME} endevor ret element {element} --type {type} "
         + f"--system {system} --sub {subsystem} --sm true"
     )
     return remove_empty_lines(element_contents)
@@ -165,7 +166,7 @@ def get_endevor_element(element, type):
 
 # @log_exec
 def get_dataset_member(dsn, member):
-    ds_contents = execute(f"{ZOWE_CMD} files view ds {dsn}({member})")
+    ds_contents = execute(f"{ZOWE_CMD_NAME} files view ds {dsn}({member})")
     return remove_empty_lines(ds_contents)
 
 
@@ -214,7 +215,7 @@ def last_comment(data, environment, sn):
 def get_last_commit_message(file, environment, system, subsystem,
                             type, stageNumber):
     cmd = (
-        f"{ZOWE_CMD} endevor list elements {file} --env * --sys {system} "
+        f"{ZOWE_CMD_NAME} endevor list elements {file} --env * --sys {system} "
         + f"--sub {subsystem} --sn * --type {type} --sm " +
         "--rfj --write-report false"
     )
@@ -346,7 +347,7 @@ def checkout_file(file, type, dsn):
     ccid = comment = "TEMP"  # Does this need updating?
     file = file.split(".")[0]
     signout_cmd = (
-        f"{ZOWE_CMD} endevor ret element {file} --env {environment} " +
+        f"{ZOWE_CMD_NAME} endevor ret element {file} --env {environment} " +
         f"--sys {system} --sub {subsystem} --sn {stageNumber} " +
         f'--type {type} --signout --ccid {ccid} --comment "{comment}" ' +
         f"--rfj --sm --write-report false --td {dsn} --rm true"
@@ -367,7 +368,7 @@ def update_dataset(file, system, subsystem):
             with open(file, "r") as f:
                 contents = f.read()
             logger(f"Copying {file}, contents\n\n\n\n{contents}")
-            execute(f"{ZOWE_CMD} files upload file-to-data-set {file} " +
+            execute(f"{ZOWE_CMD_NAME} files upload file-to-data-set {file} " +
                     f"{dsname} --rfj")
             logger(f"{file} checkout and {dsname.upper()} updated.", True)
 
@@ -453,8 +454,8 @@ def process_modify(fn, tp, dsname, file, sub_or_alias, name):
                     f'\'{bcolors.OKBLUE}zowe files download ds ' +
                     f'"{dsname}({fn})" -f <filename>\'"{bcolors.ENDC}',
                     True)
-                logger(f"To compare the files, run '{bcolors.OKBLUE}code " +
-                       f"--diff <filename> {file}'", True)
+                logger(f"To compare the files, run '{bcolors.OKBLUE}" +
+                       f"{VSCODE_CMD_NAME} --diff <filename> {file}'", True)
                 logger(
                     f"Make your changes and save them to {file}, " +
                     f"then run '{bcolors.OKBLUE}git-commit -o{bcolors.ENDC}'",
@@ -464,10 +465,11 @@ def process_modify(fn, tp, dsname, file, sub_or_alias, name):
                 if code_installed():
                     logger(f"{bcolors.FAIL}Differences found in " +
                            "the dataset. Opening the files in " +
-                           f"code.{bcolors.ENDC}")
-                    execute(f'{bcolors.OKGREEN}{ZOWE_CMD} files "download ' +
-                            f'ds "{dsname}({fn})" -f .\{fn}{bcolors.ENDC}')
-                    execute(f'code --diff .\{fn} {file}')
+                           f"{VSCODE_CMD_NAME}.{bcolors.ENDC}")
+                    execute(f'{bcolors.OKGREEN}{ZOWE_CMD_NAME} files ' +
+                            f'download ds "{dsname}({fn})" -f .\{fn}' +
+                            bcolors.ENDC)
+                    execute(f'{VSCODE_CMD_NAME} --diff .\{fn} {file}')
                     logger(f"Run '{bcolors.OKBLUE}git-commit " +
                            f"-o{bcolors.ENDC}' to commit the changes " +
                            "after saving your work.",
